@@ -1,0 +1,21 @@
+version: '3.11'
+services:
+  milvus:
+    image: milvusdb/milvus:v2.2.5
+    ports:
+      - "19530:19530"
+    healthcheck:
+      test: ["CMD", "pgrep", "milvus"]
+      interval: 10s
+  api:
+    build: .
+    depends_on:
+      milvus:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      - MILVUS_HOST=milvus
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - PERPLEXITY_API_KEY=${PERPLEXITY_API_KEY}
