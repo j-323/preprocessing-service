@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     milvus_port: int = Field(19530, env="MILVUS_PORT")
     log_level: str = Field("INFO", env="LOG_LEVEL")
     cache_ttl: int = Field(3600, env="CACHE_TTL")
+    redis_url: str = Field("redis://localhost:6379/0", env="REDIS_URL")
+
 
     class Config:
         env_file = ".env"
