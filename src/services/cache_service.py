@@ -1,61 +1,69 @@
-# src/services/cache_service.py
-
 import json
 import hashlib
-from typing import Any, Dict, Optional
+import asyncio
+import logging
+from typing import Any, Optional
 
 import aioredis
+from aioredis import Redis
 from src.config import settings
 from src.core.exceptions import ServiceError
 
+logger = logging.getLogger(__name__)
+
 class CacheService:
     """
-    Асинхронный сервис для кэширования результатов в Redis.
-    Используется для сокращения повторных запросов к тяжёлым тулзам
-    (например, InternetFetcher) и ускорения общей работы пайплайна.
+    Асинхронный Redis-кэшер с метриками попаданий/промахов и безопасным восстановлением соединения.
     """
 
     def __init__(self, redis_url: Optional[str] = None):
-        try:
-            url = redis_url or settings.redis_url  # убедитесь, что в settings есть REDIS_URL
-            # создаём клиент aioredis
-            self.redis = aioredis.from_url(
-                url,
-                encoding="utf-8",
-                decode_responses=True,
-            )
-        except Exception as e:
-            raise ServiceError(f"CacheService initialization failed: {e}")
+        url = redis_url or settings.redis_url
+        self._url = url
+        self._redis: Optional[Redis] = None
+        self._lock = asyncio.Lock()
+        self.hits = 0
+        self.misses = 0
+
+    async def _get_redis(self) -> Redis:
+        if self._redis is None:
+            async with self._lock:
+                if self._redis is None:
+                    try:
+                        self._redis = aioredis.from_url(
+                            self._url,
+                            encoding="utf-8",
+                            decode_responses=True,
+                            max_connections=10,
+                        )
+                    except Exception as e:
+                        logger.error("CacheService: невозможно подключиться к Redis", exc_info=e)
+                        raise ServiceError(f"Redis init failed: {e}")
+        return self._redis
 
     def _make_key(self, prefix: str, text: str) -> str:
-        """
-        Генерируем ключ на основе префикса и md5-хеша текста.
-        """
         fingerprint = hashlib.md5(text.encode("utf-8")).hexdigest()
         return f"{prefix}:{fingerprint}"
 
     async def get(self, prefix: str, text: str) -> Optional[Any]:
-        """
-        Попытаться достать значение из кэша.
-        Возвращает распарсенный объект или None.
-        """
         key = self._make_key(prefix, text)
         try:
-            raw = await self.redis.get(key)
+            redis = await self._get_redis()
+            raw = await redis.get(key)
             if raw is None:
+                self.misses += 1
                 return None
+            self.hits += 1
             return json.loads(raw)
         except Exception as e:
-            raise ServiceError(f"CacheService.get failed: {e}")
+            logger.warning("CacheService.get error, пропускаем кэш", exc_info=e)
+            return None
 
     async def set(self, prefix: str, text: str, value: Any, ttl: Optional[int] = None) -> None:
-        """
-        Поставить в кэш произвольный объект (сериализуем в JSON).
-        TTL берётся из settings.cache_ttl, если не передан.
-        """
         key = self._make_key(prefix, text)
         try:
+            redis = await self._get_redis()
             payload = json.dumps(value)
-            await self.redis.set(key, payload, ex=ttl or settings.cache_ttl)
+            expire = ttl or settings.cache_ttl
+            await redis.set(key, payload, ex=expire)
         except Exception as e:
-            raise ServiceError(f"CacheService.set failed: {e}")
+            logger.warning("CacheService.set error, не удалось сохранить в кэш", exc_info=e)
